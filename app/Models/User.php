@@ -23,6 +23,7 @@ class User extends Authenticatable
         'email',
         'password',
         'stripe_customer_id',
+        'social_id'
     ];
 
     /**
@@ -51,5 +52,15 @@ class User extends Authenticatable
     public function payments()
     {
         return $this->hasMany(Payment::class);
+    }
+    
+    public function paymentMethods()
+    {
+        return $this->hasMany(PaymentMethod::class);
+    }
+    
+    public function subscriptions()
+    {
+        return $this->hasMany(Subscription::class);
     }
 }

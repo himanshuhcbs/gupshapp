@@ -10,9 +10,8 @@ class UserController extends Controller
 {
     public function index()
     {
-        // Only allow admins to view all users
         if (auth()->user()) {
-            return User::all();
+            return User::with(['payments', 'paymentMethods', 'subscriptions'])->where('id', '=', auth()->user()->id)->first();
         }
         return response()->json(['message' => 'Unauthorized'], 403);
     }
