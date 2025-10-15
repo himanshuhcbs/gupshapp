@@ -39,6 +39,9 @@ class StripeWebhookController extends Controller
         }
 
         switch ($event->type) {
+            case 'payment_intent.created':
+                // $this->handlePaymentIntentCreated($event->data->object);
+                break;
             case 'payment_intent.succeeded':
                 $this->handlePaymentIntentSucceeded($event->data->object);
                 break;
@@ -81,6 +84,27 @@ class StripeWebhookController extends Controller
         }
 
         return response()->json(['message' => 'Webhook handled successfully'], 200);
+    }
+    
+    /**
+     * Handle Payment Intent Created
+     */
+    private function handlePaymentIntentCreated($paymentIntent)
+    {
+        Payment::create([
+            'user_id' => $paymentIntent->metadata->user_id,
+            'amount' => $paymentIntent->amount,
+            'currency' => $paymentIntent->currency,
+            'stripe_payment_id' => $paymentIntent->id,
+            'status' => $paymentIntent->status,
+            'payment_method_type' => $paymentIntent->payment_method_types[0] ?? null,
+        ]);
+        
+        Log::info('Payment Intent Created', [
+            'payment_id' => $paymentIntent->id,
+            'stripe_id' => $paymentIntent->id,
+            'amount' => $paymentIntent->amount,
+        ]);
     }
 
     /**

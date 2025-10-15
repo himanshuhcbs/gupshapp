@@ -16,8 +16,11 @@ use Stripe\Price;
 use Stripe\PaymentMethod as StripePaymentMethod;
 use Stripe\Product;
 use Stripe\SetupIntent;
+use Stripe\Invoice;
+use Stripe\Refund;
 use Stripe\Exception\ApiErrorException;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 class PaymentController extends Controller
 {
@@ -62,6 +65,7 @@ class PaymentController extends Controller
                 'amount' => $request->amount,
                 'currency' => $request->currency,
                 'payment_method_type' => 'pending',
+                'metadata' => array_merge(['user_id' => $user->id], $request->metadata ?? []),
             ]);
 
             return response()->json([
@@ -133,14 +137,16 @@ class PaymentController extends Controller
 
             if ($paymentIntent->status === 'succeeded') {
                 // Save to payments table
-                Payment::create([
-                    'user_id' => $user->id,
-                    'stripe_payment_id' => $paymentIntent->id,
-                    'amount' => $paymentIntent->amount / 100,
-                    'currency' => $paymentIntent->currency,
-                    'status' => $paymentIntent->status,
-                    'payment_method_id' => $paymentMethodId,
-                ]);
+                Payment::updateOrCreate(
+                    ['stripe_payment_id' => $paymentIntent->id], // Search condition
+                    [
+                        'user_id' => $user->id,
+                        'amount' => $paymentIntent->amount / 100,
+                        'currency' => $paymentIntent->currency,
+                        'status' => $paymentIntent->status,
+                        'payment_method_id' => $paymentMethodId,
+                    ]
+                );
 
                 return response()->json([
                     'message' => 'Payment confirmed! Cha-ching! 😎',
@@ -156,6 +162,100 @@ class PaymentController extends Controller
             return response()->json(['error' => 'Failed to confirm payment intent: ' . $e->getMessage()], 400);
         }
     }
+    
+    /**
+     * Process Full Refund for a Payment Intent
+     * Updates payments table status and adds refund_id to metadata
+     */
+    public function refundPayment(Request $request)
+    {
+        $request->validate([
+            'payment_intent_id' => 'required|string',
+            'reason' => 'nullable|string',
+        ]);
+
+        $user = $request->user();
+        $paymentIntentId = $request->payment_intent_id;
+
+        try {
+            // Retrieve and validate PaymentIntent
+            $paymentIntent = PaymentIntent::retrieve($paymentIntentId);
+
+            // Verify belongs to user
+            if ($paymentIntent->customer !== $user->stripe_customer_id) {
+                return response()->json(['error' => 'Payment intent does not belong to this user'], 403);
+            }
+
+            // Check if already refunded
+            if ($paymentIntent->status === 'canceled' || $paymentIntent->amount_refunded >= $paymentIntent->amount) {
+                return response()->json(['error' => 'Payment has already been fully refunded or canceled'], 400);
+            }
+
+            // Check if payment succeeded
+            if ($paymentIntent->status !== 'succeeded') {
+                return response()->json(['error' => 'Only successful payments can be refunded'], 400);
+            }
+
+            // Create full refund
+            $refund = Refund::create([
+                'payment_intent' => $paymentIntentId,
+                'reason' => $request->reason ?? 'requested_by_customer',
+                'metadata' => [
+                    'user_id' => $user->id,
+                    'app_name' => 'gupshapp',
+                    'refund_type' => 'full',
+                    'original_payment_intent' => $paymentIntentId,
+                ],
+            ]);
+
+            // Update local payments table
+            $payment = Payment::where('user_id', $user->id)
+                ->where('stripe_payment_id', $paymentIntentId)
+                ->first();
+
+            if ($payment) {
+                // Update status and add refund_id to metadata
+                $payment->update([
+                    'status' => 'refunded',
+                    'metadata' => array_merge(
+                        $payment->metadata ?? [],
+                        [
+                            'refund_id' => $refund->id,
+                            'refund_status' => $refund->status,
+                            'refund_amount' => $refund->amount / 100,
+                            'refund_reason' => $refund->reason,
+                            'refund_created_at' => Carbon::createFromTimestamp($refund->created)->toDateTimeString(),
+                        ]
+                    ),
+                ]);
+            }
+
+            return response()->json([
+                'message' => 'Full refund processed successfully! Money back guaranteed! 💰😎',
+                'refund' => [
+                    'id' => $refund->id,
+                    'status' => $refund->status,
+                    'amount' => $refund->amount / 100,
+                    'currency' => $refund->currency,
+                    'reason' => $refund->reason,
+                    'payment_intent' => $refund->payment_intent,
+                    'created' => Carbon::createFromTimestamp($refund->created)->toDateTimeString(),
+                ],
+                'payment_intent' => [
+                    'id' => $paymentIntentId,
+                    'status' => $paymentIntent->status,
+                    'amount' => $paymentIntent->amount / 100,
+                    'amount_refunded' => $paymentIntent->amount_refunded / 100,
+                ],
+                'local_record_updated' => $payment ? true : false,
+            ], 200);
+
+        } catch (ApiErrorException $e) {
+            return response()->json([
+                'error' => 'Failed to process refund: ' . $e->getMessage(),
+            ], 400);
+        }
+    }
 
     /**
      * Get User's Payment History
@@ -163,11 +263,23 @@ class PaymentController extends Controller
     public function history(Request $request)
     {
         $user = $request->user();
-        $payments = $user->payments()->orderBy('created_at', 'desc')->get();
-
+        
+        $perPage = $request->integer('per_page', 10);
+        $page = $request->integer('page', 1);
+        
+        $payments = $user->payments()
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage, ['*'], 'page', $page);
+        
         return response()->json([
-            'payments' => $payments,
-            'total' => $payments->count(),
+            'payments' => $payments->items(),
+            'pagination' => [
+                'current_page' => $payments->currentPage(),
+                'total_pages' => $payments->lastPage(),
+                'total' => $payments->total(),
+                'per_page' => $payments->perPage(),
+                'has_next' => $payments->hasMorePages(),
+            ]
         ], 200);
     }
 
@@ -734,7 +846,7 @@ class PaymentController extends Controller
                 $paymentMethod->attach(['customer' => $user->stripe_customer_id]);
             }
 
-            // Create subscription
+            // Create subscription WITHOUT expand to avoid timing issues
             $stripeSubscription = StripeSubscription::create([
                 'customer' => $user->stripe_customer_id,
                 'items' => [['price' => $request->price_id]],
@@ -744,9 +856,9 @@ class PaymentController extends Controller
                     'save_default_payment_method' => 'on_subscription',
                 ],
                 'default_payment_method' => $paymentMethodId,
-                'expand' => ['latest_invoice.payment_intent'],
             ]);
 
+            // Get period dates from subscription (not items.data[0])
             // Get period dates from items.data[0]
             $currentPeriodStart = null;
             $currentPeriodEnd = null;
@@ -757,26 +869,69 @@ class PaymentController extends Controller
                 return response()->json(['error' => 'Subscription items not found'], 400);
             }
 
+            // Explicitly retrieve latest_invoice with expanded payment_intent
+            $paymentIntentId = null;
+            $clientSecret = null;
+            $latestInvoiceId = $stripeSubscription->latest_invoice;
+
+            if ($latestInvoiceId) {
+                try {
+                    // Retrieve and expand the invoice to get payment_intent
+                    $invoice = Invoice::retrieve($latestInvoiceId, [
+                        'expand' => ['payment_intent']
+                    ]);
+
+                    if ($invoice->payment_intent) {
+                        $paymentIntent = $invoice->payment_intent;
+                        $paymentIntentId = $paymentIntent instanceof \Stripe\PaymentIntent 
+                            ? $paymentIntent->id 
+                            : $paymentIntent;
+                        $clientSecret = $paymentIntent instanceof \Stripe\PaymentIntent 
+                            ? $paymentIntent->client_secret 
+                            : null;
+                    }
+                } catch (ApiErrorException $invoiceError) {
+                    // Log but don't fail - payment_intent might not be ready yet
+                    Log::warning('Failed to retrieve invoice payment_intent', [
+                        'subscription_id' => $stripeSubscription->id,
+                        'invoice_id' => $latestInvoiceId,
+                        'error' => $invoiceError->getMessage()
+                    ]);
+                }
+            }
+
             // Save subscription to database
             $subscription = Subscription::create([
                 'user_id' => $user->id,
                 'stripe_subscription_id' => $stripeSubscription->id,
                 'stripe_price_id' => $request->price_id,
                 'status' => $stripeSubscription->status,
-                'current_period_start' => $currentPeriodStart ? Carbon::createFromTimestamp($currentPeriodStart) : null,
-                'current_period_end' => $currentPeriodEnd ? Carbon::createFromTimestamp($currentPeriodEnd) : null,
+                'current_period_start' => Carbon::createFromTimestamp($currentPeriodStart),
+                'current_period_end' => Carbon::createFromTimestamp($currentPeriodEnd),
                 'payment_method_id' => $paymentMethodId,
+                'latest_invoice_id' => $latestInvoiceId, // Optional: store invoice ID
+                'payment_intent_id' => $paymentIntentId, // Optional: store for quick access
             ]);
 
-            // Check if payment confirmation is needed (e.g., 3D Secure)
-            if ($stripeSubscription->status === 'incomplete' && $stripeSubscription->latest_invoice->payment_intent) {
-                $paymentIntent = $stripeSubscription->latest_invoice->payment_intent;
+            // Check if payment confirmation is needed
+            if ($stripeSubscription->status === 'incomplete' && $paymentIntentId) {
                 return response()->json([
                     'message' => 'Subscription created, but payment needs confirmation! Let’s secure it! 😎',
                     'subscription_id' => $stripeSubscription->id,
-                    'payment_intent_id' => $paymentIntent->id,
-                    'client_secret' => $paymentIntent->client_secret,
+                    'payment_intent_id' => $paymentIntentId,
+                    'client_secret' => $clientSecret,
                     'status' => $stripeSubscription->status,
+                    'invoice_id' => $latestInvoiceId,
+                ], 200);
+            } elseif ($stripeSubscription->status === 'incomplete') {
+                // Fallback: return subscription details, let client poll or use getSubscription
+                return response()->json([
+                    'message' => 'Subscription created but payment intent not ready. Use GET /subscription to check status! 😎',
+                    'subscription_id' => $stripeSubscription->id,
+                    'status' => $stripeSubscription->status,
+                    'invoice_id' => $latestInvoiceId,
+                    'payment_intent_id' => null, // Will be available via GET /subscription
+                    'action' => 'poll', // Suggest client polls getSubscription endpoint
                 ], 200);
             }
 
@@ -784,8 +939,8 @@ class PaymentController extends Controller
                 'message' => 'Subscription created successfully! You’re all set! 😎',
                 'subscription_id' => $stripeSubscription->id,
                 'status' => $stripeSubscription->status,
-                'current_period_start' => $subscription->current_period_start ? $subscription->current_period_start->toDateTimeString() : null,
-                'current_period_end' => $subscription->current_period_end ? $subscription->current_period_end->toDateTimeString() : null,
+                'current_period_start' => $subscription->current_period_start->toDateTimeString(),
+                'current_period_end' => $subscription->current_period_end->toDateTimeString(),
             ], 200);
         } catch (ApiErrorException $e) {
             return response()->json(['error' => 'Failed to create subscription: ' . $e->getMessage()], 400);
@@ -808,13 +963,22 @@ class PaymentController extends Controller
 
         try {
             $stripeSubscription = StripeSubscription::retrieve($subscriptionId, [
-                'expand' => ['items.data.price.product']
+                'expand' => ['items.data.price.product', 'latest_invoice', 'latest_invoice.payment_intent']
             ]);
+            
+            // Safely access latest_invoice as an object
+            $invoice = $stripeSubscription->latest_invoice;
+            $invoiceId = $invoice instanceof \Stripe\Invoice ? $invoice->id : $invoice;
+            $paymentIntentId = $invoice instanceof \Stripe\Invoice && $invoice->payment_intent 
+                ? ($invoice->payment_intent instanceof \Stripe\PaymentIntent ? $invoice->payment_intent->id : $invoice->payment_intent) 
+                : null;
 
             return response()->json([
                 'subscription' => [
                     'id' => $stripeSubscription->id,
                     'status' => $stripeSubscription->status,
+                    'invoice_id' => $invoiceId,
+                    'payment_intent_id' => $paymentIntentId,
                     'current_period_start' => $stripeSubscription->current_period_start 
                         ? Carbon::createFromTimestamp($stripeSubscription->current_period_start) 
                         : null,

@@ -19,6 +19,7 @@ return new class extends Migration
             $table->decimal('amount', 8, 2);
             $table->string('currency');
             $table->string('payment_method_type')->nullable();  // e.g., 'card', 'ach_debit'
+            $table->json('metadata')->nullable();
             $table->timestamps();
         });
     }

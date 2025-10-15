@@ -18,6 +18,8 @@ class Subscription extends Model
         'current_period_start',
         'current_period_end',
         'cancel_at',
+        'latest_invoice_id',
+        'payment_intent_id',
     ];
     
     public function user()

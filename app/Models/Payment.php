@@ -16,6 +16,11 @@ class Payment extends Model
         'amount',
         'currency',
         'payment_method_type',
+        'metadata',
+    ];
+    
+    protected $casts = [
+        'metadata' => 'array',
     ];
 
     public function user()

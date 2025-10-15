@@ -25,6 +25,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/payments/intent', [PaymentController::class, 'createIntent']);
     Route::post('/payments/confirm', [PaymentController::class, 'confirmIntent']);
     Route::get('/payments/history', [PaymentController::class, 'history']);
+    Route::post('/payments/refund', [PaymentController::class, 'refundPayment']);
 
     // Stripe Customers
     Route::post('/stripe/customer/create', [PaymentController::class, 'createCustomer']);
