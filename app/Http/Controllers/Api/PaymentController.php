@@ -1088,4 +1088,25 @@ class PaymentController extends Controller
             return response()->json(['error' => $e->getMessage()], 400);
         }
     }
+    
+    public function getInvoice(Request $request, $invoiceId)
+    {
+        try {
+            $invoice = Invoice::retrieve($invoiceId);
+            return response()->json($invoice, 200);
+        } catch (ApiErrorException $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+    }
+    
+    public function payInvoice(Request $request, $invoiceId)
+    {
+        try {
+            $invoice = Invoice::retrieve($invoiceId);
+            $invoice->pay();
+            return response()->json($invoice, 200);
+        } catch (ApiErrorException $e) {
+            return response()->json(['error' => $e->getMessage()], 400);
+        }
+    }
 }

@@ -49,6 +49,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/stripe/subscription/{subscriptionId}', [PaymentController::class, 'getSubscription']);
     Route::post('/stripe/subscription/{subscriptionId}/update', [PaymentController::class, 'updateSubscription']);
     Route::post('/stripe/subscription/{subscriptionId}/cancel', [PaymentController::class, 'cancelSubscription']);
+    
+    // Stripe Invoices
+    Route::get('/stripe/invoices/{invoiceId}', [PaymentController::class, 'getInvoice']);
+    Route::post('/stripe/invoices/{invoiceId}/pay', [PaymentController::class, 'payInvoice']);
 });
 
 // Stripe Webhook (Unprotected)
